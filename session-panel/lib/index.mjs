@@ -5,6 +5,7 @@
 // Copyright (C) 2026 Swcmb
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import { appendFileSync } from 'node:fs';
 import { messageBlockParts, toolSchemaTokens } from './tokens.mjs';
 
 export const name = 'dsh-session-panel';
@@ -14,6 +15,8 @@ export const inject = ['webServer'];
 const ROUTE = '/__dsh-session-panel';
 const KEPT_SESSIONS = 24;
 const ANSWER_TTL_MS = 1000;
+// 客户端自证日志落盘位置（宿主侧），便于在桌面应用里核对真实运行时状态。
+const DIAG_FILE = new URL('../.diag.log', import.meta.url);
 
 // 上下文分项类别与发布顺序。
 const KIND_ORDER = ['system', 'tools', 'mcp', 'skills', 'conversation', 'reasoning', 'tool-call', 'tool-result', 'attachment', 'injection'];
@@ -264,6 +267,32 @@ export function apply(ctx) {
     if (entry) entry.value = value;
     return value;
   };
+
+  // 客户端自证通道：client 半把运行时状态 POST 上来，宿主侧落盘。
+  // 这样在桌面应用里无需截图、无需浏览器，就能核对真实的注册/渲染状态。
+  const DIAG_PATH = `${ROUTE}/diag`;
+  web.register({
+    kind: 'prefix',
+    path: DIAG_PATH,
+    handler: (req, res) => {
+      let body = '';
+      req.on('data', c => { body += c; });
+      req.on('end', () => {
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        try {
+          const payload = JSON.parse(body || '{}');
+          const events = Array.isArray(payload.events) ? payload.events : [];
+          for (const event of events) {
+            const line = JSON.stringify({ t: Date.now(), ...event });
+            try { appendFileSync(DIAG_FILE, line + '\n'); } catch { /* 落盘失败不影响功能 */ }
+          }
+          res.writeHead(200).end(JSON.stringify({ ok: true, accepted: events.length }));
+        } catch (err) {
+          res.writeHead(200).end(JSON.stringify({ ok: false, error: String(err?.message ?? err) }));
+        }
+      });
+    },
+  });
 
   web.register({
     kind: 'prefix',

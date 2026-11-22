@@ -16,6 +16,63 @@ window.__ModuleLoader__.load({
     const PANEL_ROOT = '.dsh-claude-details-root';
     const TOGGLE_BUTTON = '.dsh-claude-session-panel-button';
     const PANEL_FLAG = 'data-dsh-claude-session-panel';
+    const DIAG_ENDPOINT = '/__dsh-cs-panel-hider/diag';
+
+    // ---- 自证通道 ----------------------------------------------------------
+    // 把运行时状态 POST 给宿主落盘，外部即可程序化核对"隐藏规则是否生效"。
+    // 这是样式契约断言（读 computed style 的 display），不是看屏幕。
+    let lastSignature = '';
+    function mark(stage, extra) {
+      const event = extra ? { t: Date.now(), stage, ...extra } : { t: Date.now(), stage };
+      try {
+        fetch(DIAG_ENDPOINT, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ events: [event] }),
+        }).catch(() => {});
+      } catch { /* 宿主未就绪时静默 */ }
+    }
+
+    // 断言：目标节点若存在，其 computed display 必须是 none。
+    function assertHidden(selector, label) {
+      let present = false;
+      let display = null;
+      let visibility = null;
+      try {
+        const el = document.querySelector(selector);
+        present = el !== null;
+        if (present) {
+          const cs = getComputedStyle(el);
+          display = cs.display;
+          visibility = cs.visibility;
+        }
+      } catch { /* 环境不可用 */ }
+      return { label, present, display, visibility, hidden: present ? (display === 'none' || visibility === 'hidden') : null };
+    }
+
+    function probe() {
+      try {
+        const style = document.getElementById(STYLE_ID);
+        const panel = assertHidden(PANEL_ROOT, 'panel');
+        const toggle = assertHidden(TOGGLE_BUTTON, 'toggle');
+        const bodyFlag = !!(document.body?.hasAttribute?.(PANEL_FLAG));
+        const found = {
+          styleInstalled: !!style,
+          styleHasRule: !!style && style.textContent.includes(PANEL_ROOT),
+          panel,
+          toggle,
+          bodyPanelFlag: bodyFlag,
+        };
+        const signature = JSON.stringify(found);
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          mark('hide-probe', found);
+        }
+      } catch (err) {
+        mark('hide-probe-failed', { message: String(err?.message ?? err) });
+      }
+    }
 
     // dsh-claude-style 把详情栏挂成 body 下的 .dsh-claude-details-root，
     // 开关按钮落在会话头部 utilities 槽、class 为 .dsh-claude-session-panel-button。
@@ -44,6 +101,9 @@ window.__ModuleLoader__.load({
 
     function apply() {
       installStyle();
+      mark('style-installed', { styleId: STYLE_ID });
+      probe();
+      const timer = setInterval(probe, 2000);
 
       // CSS 已足够隐藏两个目标。观察器只处理 body 上的 data-dsh-claude-session-panel：
       // dsh-claude-style 用它把头部让位给面板（见它的 CSS），面板没了就该清掉，
@@ -75,6 +135,7 @@ window.__ModuleLoader__.load({
 
       // 供宿主卸载时清理；原生 DSH 会在插件停用时调用返回的 disposer。
       return () => {
+        try { clearInterval(timer); } catch { /* 忽略 */ }
         if (observer) observer.disconnect();
         const style = document.getElementById(STYLE_ID);
         if (style) style.remove();

@@ -274,6 +274,7 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         if (id === '') return undefined;
+        diag('panel-mounted', { sessionId: id });
         let timer = null, stopped = false, inFlight = false;
         const tick = async () => {
           if (stopped || document.hidden || inFlight) return;
@@ -282,8 +283,8 @@ window.__ModuleLoader__.load({
             const res = await fetch(`${ROUTE}?id=${encodeURIComponent(id)}`, { credentials: 'same-origin', headers: { accept: 'application/json' } });
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const answer = await res.json();
-            if (!stopped && answer?.ok === true) setValue(answer.value);
-          } catch { /* 宿主尚未就绪，下一轮重试 */ }
+            if (!stopped && answer?.ok === true) { setValue(answer.value); diag('panel-data', { sessionId: id, ok: true }); }
+          } catch (err) { diag('panel-fetch-failed', { sessionId: id, message: String(err && err.message || err) }); }
           finally { inFlight = false; }
         };
         setValue(null);
@@ -299,6 +300,64 @@ window.__ModuleLoader__.load({
     function SidebarTabTitle() {
       return h('span', { className: 'dsp-tab-title' }, COPY.detailsToggle);
     }
+
+    // 状态层自证（不依赖 DOM/UI、不点任何按钮）：
+    // 读取 sidebar-right 自己写入的持久化布局（localStorage，键 dsh.sidebar-right.v1.<sessionId>），
+    // 按其 schema 解析出每个会话的 tab 列表与激活 tab，据此断言：
+    //   1) 「会话详情」tab 存在于该会话的布局中；
+    //   2) 它是当前激活的 tab（即右侧栏默认呈现的就是会话详情）；
+    //   3) 原生 guide（kind='guide'）tab 已不在该会话布局里（已被替换）。
+    function probeState() {
+      try {
+        if (typeof localStorage === 'undefined') return;
+        const sessions = [];
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const key = localStorage.key(i);
+          if (!key || !key.startsWith('dsh.sidebar-right.v1.')) continue;
+          const sessionId = key.slice('dsh.sidebar-right.v1.'.length);
+          let envelope = null;
+          try { envelope = JSON.parse(localStorage.getItem(key) || 'null'); } catch {}
+          const surface = envelope?.bySession?.[sessionId];
+          const layout = surface?.layout;
+          if (!layout || !layout.tabs) continue;
+          const tabs = Object.values(layout.tabs).map((t) => ({
+            tabId: t.id, kind: t.kind, title: t.title, contentId: t.contentId,
+          }));
+          // 激活态来自 pane 的 activeTabId。
+          const activeTabIds = new Set();
+          for (const node of Object.values(layout.nodes || {})) {
+            if (node?.kind === 'pane' && node.activeTabId) activeTabIds.add(node.activeTabId);
+          }
+          const details = tabs.find((t) => t.kind === TAB_KIND);
+          const guide = tabs.find((t) => t.kind === 'guide');
+          sessions.push({
+            sessionId,
+            expanded: layout.expanded === true,
+            tabCount: tabs.length,
+            kinds: tabs.map((t) => t.kind),
+            detailsPresent: !!details,
+            detailsActive: !!(details && activeTabIds.has(details.tabId)),
+            guidePresent: !!guide,
+            tabs,
+          });
+        }
+        const signature = JSON.stringify(sessions);
+        if (signature !== lastStateSignature) {
+          lastStateSignature = signature;
+          const mine = sessions.filter((s) => s.detailsPresent);
+          diag('state-probe', {
+            sessionCount: sessions.length,
+            withDetails: mine.length,
+            detailsActiveCount: mine.filter((s) => s.detailsActive).length,
+            guideReplacedCount: mine.filter((s) => !s.guidePresent).length,
+            sessions,
+          });
+        }
+      } catch (err) {
+        diag('state-probe-failed', { message: String(err && err.message || err) });
+      }
+    }
+    let lastStateSignature = '';
 
     // guide 入口图标（ComponentType<IconProps>）：一个简洁的会话详情符号。
     function GuideIcon(props) {
@@ -317,11 +376,50 @@ window.__ModuleLoader__.load({
     const TAB_ID = '@local/dsh-session-panel';
     const TAB_KIND = 'dsh-session-details';
 
+    // 运行时自证：把注册过程的关键事实写进 localStorage。
+    // 桌面端与 Web 端共用同一份渲染进程存储，可在不截图、不开浏览器的情况下直接核对真实运行时状态。
+    const DIAG_KEY = 'dsh-session-panel:diag';
+    const DIAG_ENDPOINT = '/__dsh-session-panel/diag';
+    function diag(stage, extra) {
+      const event = { t: Date.now(), stage, ...(extra || {}) };
+      try {
+        if (typeof localStorage !== 'undefined') {
+          let prev = { events: [] };
+          try { prev = JSON.parse(localStorage.getItem(DIAG_KEY) || 'null') || prev; } catch {}
+          const events = Array.isArray(prev.events) ? prev.events : [];
+          events.push(event);
+          localStorage.setItem(DIAG_KEY, JSON.stringify({ stage, at: Date.now(), events }));
+        }
+      } catch {}
+      // 同时上报宿主侧，落盘成可随时核对的日志。
+      try {
+        fetch(DIAG_ENDPOINT, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ events: [event] }),
+        }).catch(() => {});
+      } catch {}
+    }
+
     function registerTabType(ctx) {
       const disposers = [];
       const push = (fn) => { if (typeof fn === 'function') disposers.push(fn); };
       const tabs = ctx.sidebarRightTabs;
-      if (!tabs || typeof tabs.register !== 'function') return undefined;
+      if (!tabs || typeof tabs.register !== 'function') {
+        diag('no-registry', { hasSlots: !!ctx.slots, hasInject: typeof ctx.inject === 'function' });
+        return undefined;
+      }
+      // HMR 重载会重新 apply 本插件，而上一次注册仍占着 tab id（注册表对 id 唯一）。
+      // 用全局句柄把上一次的注册先释放掉，保证重复 apply 幂等。
+      const globalKey = '__DSH_SESSION_PANEL_REGISTRATION__';
+      try {
+        const previous = globalThis[globalKey];
+        if (typeof previous === 'function') {
+          previous();
+          diag('released-previous');
+        }
+      } catch {}
       try {
         // 阶段一：注册 tab 类型 + guide 入口。
         push(tabs.register({
@@ -350,13 +448,40 @@ window.__ModuleLoader__.load({
         // 重复注册 / 接线错误时回滚已完成的注册，避免卡住启动。
         for (const d of disposers) { try { d(); } catch {} }
         if (typeof console !== 'undefined' && console.warn) console.warn('[dsh-session-panel] register failed', err);
+        diag('register-failed', { error: String(err && err.message || err) });
         return undefined;
       }
-      return () => { for (const d of disposers) { try { d(); } catch {} } };
+      diag('registered', { tabId: TAB_ID, kind: TAB_KIND, disposers: disposers.length });
+      // 周期性状态层探针：读 sidebar-right 自己的持久化布局存储，
+      // 断言「会话详情」tab 已被打开且处于激活位。不触碰 DOM。
+      try {
+        probeState();
+        const timer = setInterval(probeState, 2000);
+        disposers.push(() => { try { clearInterval(timer); } catch {} });
+      } catch {}
+      // 直接读取注册表，确认 guide 入口已被采纳（这正是"开始"页卡片的数据来源）。
+      try {
+        const registry = ctx.sidebarRightTabs;
+        const list = registry.guide?.() ?? [];
+        const mine = list.filter((e) => e.kind === TAB_KIND || e.providerId === TAB_ID);
+        diag('guide-entries', {
+          total: list.length,
+          mineCount: mine.length,
+          mine: mine.map((e) => ({ kind: e.kind, providerId: e.providerId, id: e.id, title: e.title?.() })),
+          // get(kind) 存在即代表该 kind 可被 openTab 打开。
+          kindResolvable: !!registry.get?.(TAB_KIND),
+        });
+      } catch (err) {
+        diag('guide-entries-failed', { message: String(err && err.message || err) });
+      }
+      const dispose = () => { for (const d of disposers) { try { d(); } catch {} } };
+      try { globalThis.__DSH_SESSION_PANEL_REGISTRATION__ = dispose; } catch {}
+      return dispose;
     }
 
     function applyWithCtx(ctx) {
       injectStyle();
+      diag('apply', { hasSlots: typeof ctx?.slots?.inject === 'function', hasInject: typeof ctx?.inject === 'function' });
       if (!ctx || typeof ctx.slots?.inject !== 'function' || typeof ctx.slots?.register !== 'function') return;
       // sidebarRightTabs 由 sidebar-right 插件在自身 apply 顶层 provide，加载更晚；
       // 用 ctx.inject 等待其就绪后再注册（与 dsh-context 完全一致的时序处理方式）。

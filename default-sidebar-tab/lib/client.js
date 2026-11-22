@@ -26,13 +26,23 @@ window.__ModuleLoader__.load({
     // 目的是让外部（读 LevelDB / devtools）能判断 client 半是否执行、卡在哪一步。
     const diag = { stage: 'module-evaluated', at: Date.now(), events: [] };
     function mark(stage, extra) {
+      const event = extra ? { t: Date.now(), stage, ...extra } : { t: Date.now(), stage };
       try {
         diag.stage = stage;
         diag.at = Date.now();
-        diag.events.push(extra ? { t: Date.now(), stage, ...extra } : { t: Date.now(), stage });
+        diag.events.push(event);
         if (diag.events.length > 16) diag.events.shift();
         window.localStorage.setItem(DIAG_KEY, JSON.stringify(diag));
       } catch { /* 存储不可用时静默，不影响主功能 */ }
+      // 同时上报宿主侧：与 session-panel 共用同一条诊断通道，落盘后可直接核对。
+      try {
+        fetch('/__dsh-session-panel/diag', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ events: [event] }),
+        }).catch(() => {});
+      } catch { /* 宿主未就绪时静默 */ }
     }
     mark('loaded');
 
@@ -73,7 +83,6 @@ window.__ModuleLoader__.load({
       const guideTabsOf = () => openTabsOf().filter(
         (t) => t && t.kind === GUIDE_KIND && typeof t.tabId === 'string' && !handledTabs.has(t.tabId)
       );
-
       const scheduleRetry = (tabId) => {
         const count = attempts.get(tabId) ?? 0;
         if (count >= MAX_RETRIES) {
@@ -94,16 +103,40 @@ window.__ModuleLoader__.load({
         if (typeof sessionId !== 'string' || sessionId === '') return;
 
         // 只替换当前挂载会话自己的 guide：别的会话的 guide 不属于"我现在看到的右栏"。
+        // 实测 guide tab 的 sessionId 可能与 mounted 不同（guide 是每个 pane 一份的全局页），
+        // 所以先按会话精确匹配，匹配不到再退回唯一的 guide —— 否则永远不替换。
+        // 只替换「当前挂载会话」自己的 guide —— 用户在右栏看到的就是这个会话的布局。
+        // 其它会话的 guide 属于后台会话，不该被动到。
         const guides = guideTabsOf().filter((t) => t.sessionId === sessionId);
         if (guides.length === 0) return;
         const guide = guides[0];
         try {
           // 原生 replaceTab：新 tab 取代 guide 的位置并关掉 guide；
           // 若该 kind 已打开则直接聚焦它，不会开重复。
-          sidebar.openTab(defaultTab, { replaceTab: guide.tabId });
+          //
+          // 关键：guide tab 可能属于「另一个 session」（实测 guide 是每 pane 一份的全局页，
+          // 其 sessionId 常常不等于 mounted）。而 openTab 只作用于 mounted 会话，
+          // 拿另一个 session 的 tabId 去 replace 必然落空或抛
+          // "no session surface is mounted"。openTabIn(sessionId, ...) 才能对该 session
+          // 的布局动手 —— 正是 guide 真正所属的那个 session。
+          if (typeof sidebar.openTabIn === 'function') {
+            sidebar.openTabIn(guide.sessionId, defaultTab, { replaceTab: guide.tabId });
+          } else {
+            sidebar.openTab(defaultTab, { replaceTab: guide.tabId });
+          }
+          // 状态层自证：替换后立刻读 openTabs 快照，确认目标 kind 真的出现在
+          // 该会话的打开列表里（而不是"调用没抛错就算成功"）。
+          const after = openTabsOf().filter((t) => t?.kind === defaultTab);
           handledTabs.add(guide.tabId);
           attempts.delete(guide.tabId);
-          mark('replaced', { tabId: guide.tabId, sessionId: guide.sessionId, kind: defaultTab });
+          mark('replaced', {
+            tabId: guide.tabId,
+            sessionId: guide.sessionId,
+            kind: defaultTab,
+            verified: after.length > 0,
+            targetTabs: after.map((t) => ({ tabId: t?.tabId, sessionId: t?.sessionId, kind: t?.kind })),
+            guideStillOpen: openTabsOf().filter((t) => t?.kind === GUIDE_KIND).map((t) => t?.tabId),
+          });
         } catch (err) {
           const message = String(err?.message ?? err);
           if (/no session surface is mounted/i.test(message)) {
@@ -134,6 +167,12 @@ window.__ModuleLoader__.load({
               .map((t) => t.tabId),
             allGuides: tabs.filter((t) => t?.kind === GUIDE_KIND).length,
             tabCount: tabs.length,
+            // 记录 guide 的完整身份，便于核对 sessionId 匹配问题。
+            guideTabs: tabs
+              .filter((t) => t?.kind === GUIDE_KIND)
+              .map((t) => ({ tabId: t?.tabId, sessionId: t?.sessionId, kind: t?.kind })),
+            // 目标 kind 是否已出现在打开的 tab 里。
+            targetOpen: tabs.filter((t) => t?.kind === defaultTab).map((t) => t?.tabId),
           });
         }
         runReplace();

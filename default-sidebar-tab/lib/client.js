@@ -67,6 +67,7 @@ window.__ModuleLoader__.load({
       // 不按 sessionId 去重 —— 实测 openTabs 是跨会话的全局列表，
       // 而 mounted 指向的会话未必是刚播种 guide 的那个，按会话匹配会永久漏判。
       const handledTabs = new Set();
+      const skipLogged = new Set();   // 已记录过的「本次跳过原因」，仅抑制日志刷屏，不影响判定
       const attempts = new Map();    // tabId -> 已重试次数
       const timers = new Set();
       let disposed = false;
@@ -109,6 +110,36 @@ window.__ModuleLoader__.load({
         // 其它会话的 guide 属于后台会话，不该被动到。
         const guides = guideTabsOf().filter((t) => t.sessionId === sessionId);
         if (guides.length === 0) return;
+        // 离屏/后台渲染器不参与。
+        //
+        // DSH 桌面端除了可见窗口还有隐藏的渲染进程（实测同一页面跑在 618x1063 的
+        // 离屏视图里，document.hidden=true）。它们与本窗口同源，共用同一份
+        // localStorage 布局。在这里替换 guide 会把「展开右栏」写进共享布局，
+        // 可见窗口读到 expanded=true 后，角落的展开按钮按原生规则直接不渲染 ——
+        // 用户在可见窗口里看到的就是「按钮莫名消失」。
+        // 只让用户眼前那个渲染器改动布局。
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          if (!skipLogged.has(guide.tabId)) {
+            skipLogged.add(guide.tabId);
+            mark('skip-hidden-renderer', { tabId: guide.tabId, visibility: document.visibilityState });
+          }
+          return;
+        }
+        // 只在右栏本来就展开时替换。
+        //
+        // 原生 openContent 在打开任何 tab 时都会一并 planSetExpanded(state, true)，
+        // 也就是说「替换 guide」会顺手把收起的右栏顶开。而原生展开按钮
+        // （conversation.session.header.corner 的 ExpandButton）在桌面端
+        // `expanded === true` 时直接 return null —— 按钮会当场消失。
+        // 右栏收起时不去动它：角落按钮留在原位，用户点它展开后，
+        // guide 才被换成会话详情。收起状态是用户的选择，插件不替用户决定。
+        if (typeof sidebar.isExpanded === 'function' && sidebar.isExpanded() === false) {
+          if (!skipLogged.has(guide.tabId)) {
+            skipLogged.add(guide.tabId);
+            mark('skip-collapsed', { tabId: guide.tabId, sessionId: guide.sessionId });
+          }
+          return;
+        }
         const guide = guides[0];
         try {
           // 原生 replaceTab：新 tab 取代 guide 的位置并关掉 guide；
@@ -181,11 +212,50 @@ window.__ModuleLoader__.load({
       const unsubMounted = sidebar.mounted?.subscribe?.(onChange);
       const unsubTabs = sidebar.openTabs?.subscribe?.(onChange);
 
+      // 活体探针：只读原生 API 与布局存储，回答
+      //   「会话详情 tab 打开了没有」「右栏列有没有真的展开」
+      // 「原生展开按钮为什么不在场」这三个问题。
+      // 全程不点任何按钮、不看渲染结果，只读状态。
+      function probeRuntime() {
+        try {
+          const sessionId = currentSession();
+          let expanded = null;
+          let mode = null;
+          try { expanded = sidebar.isExpanded?.() ?? null; } catch { /* 无 API */ }
+          // 布局存储里的同一会话
+          let stored = null;
+          try {
+            const key = 'dsh.sidebar-right.v1.' + sessionId;
+            const env = JSON.parse(localStorage.getItem(key) || 'null');
+            const layout = env?.bySession?.[sessionId]?.layout;
+            if (layout) stored = { expanded: layout.expanded === true, mode: layout.mode ?? null };
+          } catch { /* 存储不可读 */ }
+          mark('runtime-probe', {
+            mounted: sessionId,
+            apiIsExpanded: expanded,
+            stored,
+            openTabs: openTabsOf().map((t) => ({ tabId: t?.tabId, sessionId: t?.sessionId, kind: t?.kind })),
+            hasSetExpanded: typeof sidebar.setExpanded === 'function',
+            hasToggleExpanded: typeof sidebar.toggleExpanded === 'function',
+            hasOpen: typeof sidebar.open === 'function',
+          });
+        } catch (err) {
+          mark('runtime-probe-failed', { message: String(err?.message ?? err) });
+        }
+      }
+      const probeTimer = setInterval(probeRuntime, 2000);
+      probeRuntime();
+      // 展开状态不是 openTabs/mounted 的订阅源，用户点开右栏时这两者都不一定变化。
+      // 轻量轮询补上这一条：只读 isExpanded() + 快照，不写任何状态，开销是一次函数调用。
+      const expandTimer = setInterval(runReplace, 600);
+
       // 首帧：会话与布局可能在插件加载前就就绪。
       onChange();
 
       return () => {
         disposed = true;
+        try { clearInterval(probeTimer); } catch { /* 忽略 */ }
+        try { clearInterval(expandTimer); } catch { /* 忽略 */ }
         for (const t of timers) { try { clearTimeout(t); } catch { /* 忽略 */ } }
         timers.clear();
         try { unsubMounted?.(); } catch { /* 忽略 */ }

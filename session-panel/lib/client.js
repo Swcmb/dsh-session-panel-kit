@@ -341,8 +341,95 @@ window.__ModuleLoader__.load({
             tabs,
           });
         }
-        const signature = JSON.stringify(sessions);
-        if (signature !== lastStateSignature) {
+        // 同一次采样里记录原生右侧栏相关节点的在场情况：
+        // 展开按钮只在面板收起时渲染（桌面端），所以「状态已展开但按钮不在」
+        // 与「状态已展开但面板没渲染」是两种不同的故障，必须分开看。
+        const dom = {
+          panelEl: !!document.querySelector('[data-sidebar-right-panel]'),
+          expandBtn: !!document.querySelector('[data-sidebar-right-expand]'),
+          collapseBtn: !!document.querySelector('[data-sidebar-right-toggle]'),
+          openFlag: !!document.querySelector('[data-sidebar-right-open]'),
+          ourBody: !!document.querySelector('.dsp-sidebar'),
+          ourTitle: !!document.querySelector('.dsp-tab-title'),
+          vw: document.documentElement.clientWidth,
+        };
+        // 标题栏/头部角落的按钮清单：定位「按钮消失」必须知道
+        // 当前这一排里到底有哪些按钮、各自 aria 与位置。
+        const slot = document.querySelector('[data-slot="conversation.session.header.corner"]');
+        const corner = [];
+        if (slot) {
+          for (const b of slot.querySelectorAll('button')) {
+            const cs = getComputedStyle(b);
+            const r = b.getBoundingClientRect();
+            corner.push({
+              aria: b.getAttribute('aria-label'),
+              cls: (b.getAttribute('class') || '').slice(0, 60),
+              dsrExpand: b.hasAttribute('data-sidebar-right-expand'),
+              dsrToggle: b.hasAttribute('data-sidebar-right-toggle'),
+              display: cs.display, visibility: cs.visibility,
+              x: Math.round(r.left), y: Math.round(r.top),
+              w: Math.round(r.width), h: Math.round(r.height),
+            });
+          }
+        }
+        // 框架三列：第三列就是原生右栏。宽度为 0 意味着面板即使渲染也看不见。
+        const frame = document.querySelector('[data-dsh-claude-part="layout-frame"]')
+          || document.querySelector('[data-rightbar-col]')?.parentElement;
+        const frameCols = frame ? getComputedStyle(frame).gridTemplateColumns : null;
+        const col = document.querySelector('[data-rightbar-col]');
+        dom.cornerSlot = !!slot;
+        dom.cornerButtons = corner;
+        dom.frameCols = frameCols;
+        dom.rightbarColWidth = col ? Math.round(col.getBoundingClientRect().width) : null;
+        dom.bodyRightbarCollapsed = document.body?.hasAttribute?.('data-rightbar-collapsed') === true;
+        // 原生右栏列的结构：列在但里面空，说明「面板没渲染」而非「列没开」。
+        if (col) {
+          const walk = (el, depth) => {
+            if (!el || depth > 4) return null;
+            return {
+              tag: el.tagName,
+              slot: el.getAttribute?.('data-slot') ?? undefined,
+              side: el.getAttribute?.('data-side') ?? undefined,
+              panel: el.getAttribute?.('data-sidebar-right-panel') ?? undefined,
+              open: el.getAttribute?.('data-sidebar-right-open') ?? undefined,
+              display: getComputedStyle(el).display,
+              children: Array.from(el.children || []).slice(0, 6).map((c) => walk(c, depth + 1)),
+            };
+          };
+          dom.rightbarTree = walk(col, 0);
+        }
+        // 会话头部角落 slot 的宿主：原生展开按钮的座位。
+        dom.cornerHostTree = slot ? {
+          tag: slot.tagName,
+          display: getComputedStyle(slot).display,
+          childCount: slot.children.length,
+          childTags: Array.from(slot.children || []).map((c) => c.tagName + '.' + ((c.getAttribute('class') || '').split(/\s+/)[0] || '')),
+        } : null;
+        // 窗口身份：确认诊断采样的是不是用户眼前那个窗口。
+        // DSH 桌面端同时存在可见窗口与隐藏渲染器，二者同源共用 localStorage。
+        // visibilityState/viewport 是区分它们的唯一程序化依据：
+        // 可见窗口 visibilityState='visible'，离屏渲染器为 'hidden'。
+        dom.win = {
+          title: document.title,
+          visibility: document.visibilityState,
+          inner: window.innerWidth,
+          innerHeight: window.innerHeight,
+          outer: window.outerWidth,
+          outerHeight: window.outerHeight,
+          screenX: window.screenX,
+          screenY: window.screenY,
+          screen: `${window.screen?.width ?? 0}x${window.screen?.height ?? 0}`,
+          dpr: window.devicePixelRatio,
+          hidden: document.hidden,
+          focus: document.hasFocus(),
+          isTop: window.top === window,
+          topInner: (() => { try { return window.top?.innerWidth ?? null; } catch { return 'blocked'; } })(),
+          frames: document.querySelectorAll('iframe').length,
+        };
+        const signature = JSON.stringify([sessions, dom]);
+        // 每 4 次至少上报一次，跨窗口去重会掩盖「另一个窗口」的存在。
+        stateReportCounter = (stateReportCounter + 1) % 4;
+        if (signature !== lastStateSignature || stateReportCounter === 0) {
           lastStateSignature = signature;
           const mine = sessions.filter((s) => s.detailsPresent);
           diag('state-probe', {
@@ -350,6 +437,7 @@ window.__ModuleLoader__.load({
             withDetails: mine.length,
             detailsActiveCount: mine.filter((s) => s.detailsActive).length,
             guideReplacedCount: mine.filter((s) => !s.guidePresent).length,
+            dom,
             sessions,
           });
         }
@@ -358,6 +446,7 @@ window.__ModuleLoader__.load({
       }
     }
     let lastStateSignature = '';
+    let stateReportCounter = 0;
 
     // guide 入口图标（ComponentType<IconProps>）：一个简洁的会话详情符号。
     function GuideIcon(props) {

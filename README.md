@@ -60,15 +60,44 @@ lib/
   index.mjs    host 半：从 cordis config 读配置，经 webserver/index-inject 注入页面
   client.js    client 半：订阅原生 sidebarRight，检测到 guide tab 时用 replaceTab 替换
 cordis.patch.yml  bundle 注册（client-only + 全局配置注入）
-tests/         21 项 node --test 单测
+tests/         31 项 node --test 单测（含 10 项 client 端到端行为测试）
+scripts/       无截图的运行时验证脚本（见下）
 ```
+
+## 验证（无需 UI 截图）
+
+插件运行时把自证日志写进 `localStorage` 的 `dsh-default-sidebar-tab:diag` 键
+（只写自己的键，不碰 `dsh.sidebar-right.*` 布局存储）：
+
+```
+loaded → apply → attached → probe → replaced
+```
+
+其中 `replaced` 表示原生 `guide` tab 已被换成目标 kind。
+
+原生侧栏布局落在 `localStorage` 的 `dsh.sidebar-right.v1.<sessionId>`，
+替换成功后该会话的 `tabs` 里应只剩目标 kind，例如：
+
+```json
+{"tab3":{"id":"tab3","kind":"session-inspector-log","title":"会话数据诊断"}}
+```
+
+自动化脚本：
+
+```bash
+node scripts/page-probe.mjs state   # 读页面注入值 + diag 事件 + 布局
+node scripts/page-probe.mjs eval "<js>"  # 在 renderer 里执行表达式
+node scripts/cdp-probe.mjs           # 连 Electron CDP 目标
+```
+
+`scripts/page-probe.mjs` 需要 DSH 以 `--remote-debugging-port=9333` 启动。
 
 ## 安装 / 开发
 
 本目录是 `@ianwusb/dsh-ui-adapter` 的 git 子模块（`default-sidebar-tab/`），自身也是独立 git 仓库。
 
 ```bash
-node --test tests/*.test.mjs      # 21 项单测
+node --test tests/*.test.mjs      # 31 项单测
 ```
 
 作为独立 DSH 插件注册到 profile 的方式与同仓的 `session-panel`、`cs-panel-hider` 一致：在 profile 的 `node_modules/@local/` 下建指向本目录的 junction，并在 profile `package.json` 的 `bundles` 与 `dependencies` 加入 `@local/dsh-default-sidebar-tab`，然后按上文配置 `cordis.patch.yml` 并重启 DSH。

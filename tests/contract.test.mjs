@@ -25,11 +25,18 @@ test('client 只用原生 API：mounted / openTabs / openTab', () => {
   assert.ok(client.includes('sidebar.openTab('));
 });
 
-test('client 不碰 localStorage 布局、不依赖第三方插件', () => {
-  assert.ok(!client.includes('localStorage'));
+test('client 不碰 sidebar 布局存储、不依赖第三方插件', () => {
+  // 允许写本插件自己的诊断键 dsh-default-sidebar-tab:diag（用于非截图验证），
+  // 但绝不允许读写原生的 dsh.sidebar-right.* 布局存储。
+  assert.ok(!client.includes('dsh.sidebar-right'), 'client must not touch native sidebar layout storage');
   for (const name of ['dsh-claude-style', 'dsh-context', 'better-sidebar', 'dsh-fish', 'session-panel']) {
     assert.ok(!client.includes(name), `client must not reference ${name}`);
   }
+});
+
+test('client 写自证诊断键，便于外部验证执行情况', () => {
+  assert.ok(client.includes("'dsh-default-sidebar-tab:diag'"));
+  assert.ok(client.includes('localStorage.setItem(DIAG_KEY'));
 });
 
 test('client 用 replaceTab 原位替换 guide，并有 disposer', () => {
@@ -45,9 +52,13 @@ test('host 用 webserver/index-inject 注入配置，不碰 index 文件', () =>
   assert.ok(!host.includes('writeFileSync'));
 });
 
-test('package.json：私有独立包，client inject 声明原生 sidebar-right 包', () => {
+test('package.json：私有独立包，client inject 声明原生 sidebar-right 与 modules', () => {
   assert.equal(pkg.private, true);
   assert.equal(pkg.license, 'GPL-3.0-or-later');
-  assert.deepEqual(pkg.dsh.client.inject, ['@deepseek-ai/dsh-client-ui-sidebar-right']);
+  assert.deepEqual(pkg.dsh.client.inject, [
+    '@deepseek-ai/dsh-client-ui-sidebar-right',
+    '@deepseek-ai/dsh-client-modules',
+  ]);
   assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml');
+  assert.equal(pkg.dsh.manifestVersion, 1);
 });

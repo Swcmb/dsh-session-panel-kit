@@ -31,8 +31,10 @@ test('client 不碰 localStorage 布局、不依赖第三方插件', () => {
   }
 });
 
-test('client 有未注册 kind 的回退与 disposer', () => {
-  assert.ok(client.includes("FALLBACK_TAB = 'guide'"));
+test('client 用 replaceTab 原位替换 guide，并有 disposer', () => {
+  assert.ok(client.includes('replaceTab: guide.tabId'));
+  assert.ok(client.includes("GUIDE_KIND = 'guide'"));
+  assert.ok(client.includes('scheduleRetry'));
   assert.ok(/return\s*\(\)\s*=>\s*\{/.test(client));
 });
 

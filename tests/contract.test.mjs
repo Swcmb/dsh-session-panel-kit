@@ -12,10 +12,11 @@ const client = readFileSync(join(root, 'lib', 'client.js'), 'utf8');
 const host = readFileSync(join(root, 'lib', 'index.mjs'), 'utf8');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 
-test('client 走原生 ModuleLoader，注入 sidebarRight', () => {
+test('client 走原生 ModuleLoader，ctx.inject 动态等待 sidebarRight', () => {
   assert.ok(client.includes('window.__ModuleLoader__.load'));
-  assert.ok(client.includes("const inject = ['sidebarRight']"));
-  assert.ok(client.includes('ctx.sidebarRight'));
+  assert.ok(client.includes("const inject = ['slots']"));
+  assert.ok(client.includes("ctx.inject(['sidebarRight']"));
+  assert.ok(client.includes('native?.sidebarRight'));
 });
 
 test('client 只用原生 API：mounted / openTabs / openTab', () => {
@@ -44,9 +45,9 @@ test('host 用 webserver/index-inject 注入配置，不碰 index 文件', () =>
   assert.ok(!host.includes('writeFileSync'));
 });
 
-test('package.json：私有独立包，client inject 声明 sidebarRight', () => {
+test('package.json：私有独立包，client inject 声明原生 sidebar-right 包', () => {
   assert.equal(pkg.private, true);
   assert.equal(pkg.license, 'GPL-3.0-or-later');
-  assert.deepEqual(pkg.dsh.client.inject, ['sidebarRight']);
+  assert.deepEqual(pkg.dsh.client.inject, ['@deepseek-ai/dsh-client-ui-sidebar-right']);
   assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml');
 });

@@ -33,7 +33,7 @@
     "client": {
       "platform": "web",
       "inject": [
-        "sidebarRight"
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
       ]
     }
   }

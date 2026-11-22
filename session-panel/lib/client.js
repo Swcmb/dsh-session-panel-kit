@@ -315,7 +315,7 @@ window.__ModuleLoader__.load({
     //   阶段二：slots.inject('sidebar.right.pane.tab'|'...title') 按定义 id 提供正文与标题。
     // 缺了阶段一，slot 里就没有任何 kind 与之对应，入口和正文都不会出现。
     const TAB_ID = '@local/dsh-session-panel';
-    const TAB_KIND = '@local/dsh-session-panel/session-details';
+    const TAB_KIND = 'dsh-session-details';
 
     function registerTabType(ctx) {
       const disposers = [];

@@ -30,7 +30,7 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
-        "slots"
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
       ]
     }
   }

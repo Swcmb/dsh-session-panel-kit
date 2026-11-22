@@ -54,11 +54,12 @@ const require = name => {
 const mod = loaded.factory(require);
 if (typeof mod.apply !== 'function' || !Array.isArray(mod.inject)) throw new Error('bad module exports');
 
-// 模拟 DSH apply(ctx)
+// 模拟 DSH apply(ctx)，捕获 slot 注册名
+const registered = [];
 const ctx = {
   slots: {
-    inject: (name, fn) => fn(),
-    register: (opts, component) => ({ opts, component }),
+    inject: (name, fn) => { registered.push('inject:' + name); return fn(); },
+    register: (opts, component) => { registered.push('register:' + opts.name + '/' + opts.key); return () => {}; },
   },
 };
 let applied = false;
@@ -68,15 +69,12 @@ try {
 } catch (e) {
   throw new Error('apply threw: ' + e.message);
 }
-
-// 调用注册的按钮组件，确认能构造
-const btn = mod.apply.toString() && (() => {
-  // 直接从 inject 捕获的 component 工厂调用：这里 register 已返回但需再取；简化为验证 apply 无异常
-  return null;
-})();
+if (!registered.some(r => r === 'register:sidebar.right.pane.tab/dsh-session-panel')) throw new Error('tab slot not registered');
+if (!registered.some(r => r === 'register:sidebar.right.pane.tab.title/dsh-session-panel')) throw new Error('tab title slot not registered');
 
 console.log(JSON.stringify({
   moduleId: loaded.id,
   inject: mod.inject,
   applyOk: applied,
+  slots: registered,
 }, null, 2));

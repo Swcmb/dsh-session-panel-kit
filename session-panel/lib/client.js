@@ -432,6 +432,46 @@ window.__ModuleLoader__.load({
         const col = document.querySelector('[data-rightbar-col]');
         dom.cornerSlot = !!slot;
         dom.cornerButtons = corner;
+        // 头部工具行（含「…」）的按钮顺序断言。
+        // 要求：本插件的常驻开关存在，且它在「…」左侧；原生展开按钮
+        // 与 claude-style 收起按钮都已隐藏。「…」是否为最右由 x 坐标证明，
+        // 不依赖任何截图或视觉判断。
+        {
+          // utilities slot 的宿主；它的父元素就是 headerUtilities 那一行，
+          // 「…」作为兄弟节点渲染在 slot 之后，所以本行最后一个按钮就是「…」。
+          const utilitiesHost = document.querySelector('[data-slot="conversation.session.header.utilities"]');
+          const row = utilitiesHost?.parentElement || null;
+          const buttons = row ? Array.from(row.querySelectorAll('button')) : [];
+          const pick = (el) => {
+            const cs = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            return {
+              aria: el.getAttribute('aria-label'),
+              tag: el.hasAttribute('data-dsp-header-toggle') ? 'our-toggle'
+                : el.hasAttribute('data-sidebar-right-expand') ? 'native-expand'
+                  : (el.getAttribute('class') || '').includes('dsh-claude-rightbar-close') ? 'claude-close'
+                    : 'other',
+              display: cs.display,
+              visible: cs.display !== 'none' && cs.visibility !== 'hidden' && r.width > 0,
+              x: Math.round(r.left),
+            };
+          };
+          const visible = buttons.map(pick).filter((b) => b.visible);
+          const ours = visible.find((b) => b.tag === 'our-toggle') || null;
+          const more = visible.length ? visible[visible.length - 1] : null;
+          dom.headerRow = {
+            total: buttons.length,
+            visibleCount: visible.length,
+            oursX: ours ? ours.x : null,
+            moreX: more ? more.x : null,
+            // 断言：我方开关在，且严格在最后一个可见按钮（「…」）左边。
+            oursLeftOfMore: ours !== null && more !== null && ours.x < more.x,
+            // 断言：两个会跳动的原生/claude 按钮都不在可见集合里。
+            nativeExpandHidden: !visible.some((b) => b.tag === 'native-expand'),
+            claudeCloseHidden: !visible.some((b) => b.tag === 'claude-close'),
+            order: visible.map((b) => b.tag),
+          };
+        }
         dom.frameCols = frameCols;
         dom.rightbarColWidth = col ? Math.round(col.getBoundingClientRect().width) : null;
         dom.bodyRightbarCollapsed = document.body?.hasAttribute?.('data-rightbar-collapsed') === true;

@@ -20,6 +20,9 @@ window.__ModuleLoader__.load({
     const GUIDE_KIND = 'guide';
     const MAX_RETRIES = 10;      // kind 可能稍后才注册；覆盖约 5s
     const RETRY_MS = 500;
+    // 右侧栏默认宽度。原生不设时会按 viewport * 0.45 取（1463 窗口下约 658px），
+    // 而原生下限 RIGHTBAR_MIN = 300。这里直接钉到下限：够放详情栏的行与数值。
+    const RIGHTBAR_WIDTH = 300;
 
     // ---- 自证日志 ----------------------------------------------------------
     // 只写本插件自己的键，绝不触碰原生侧栏布局存储。
@@ -58,11 +61,36 @@ window.__ModuleLoader__.load({
       return { defaultTab: DEFAULT_TAB, enabled: true };
     }
 
+    // 把右侧栏的默认宽度压到 RIGHTBAR_WIDTH。
+    //
+    // 原生只在 openRightbar 里用 `rightbar ??= viewport * 0.45` 播种一次，
+    // 之后记忆用户的拖拽结果。这里在播种前先写入，`??=` 便不会覆盖它；
+    // 已经展开过（值已存在）时则尊重现有值，不去改用户手动调过的宽度。
+    function setRightbarWidth(layout, sidebar) {
+      try {
+        const panels = layout?.panels;
+        if (!panels || typeof panels.setRightbar !== 'function') {
+          mark('rightbar-width-unavailable', {
+            hasLayout: !!layout,
+            hasPanels: !!panels,
+          });
+          return false;
+        }
+        // setRightbar 内部会 clamp 到 [300, viewport*0.7]，300 正好是下限。
+        const before = sidebar?.isExpanded?.() === true;
+        panels.setRightbar(RIGHTBAR_WIDTH);
+        mark('rightbar-width-set', { width: RIGHTBAR_WIDTH, wasExpanded: before });
+        return true;
+      } catch (err) {
+        mark('rightbar-width-failed', { message: String(err?.message ?? err) });
+        return false;
+      }
+    }
+
     function attach(sidebar) {
       const { defaultTab, enabled } = readConfig();
       mark('attached', { defaultTab, enabled, keys: Object.keys(sidebar ?? {}).slice(0, 20) });
       if (!enabled || defaultTab === GUIDE_KIND) return () => {};
-
       // 按 guide 的 tabId 去重：一个 guide 一旦被替换就永不再碰。
       // 不按 sessionId 去重 —— 实测 openTabs 是跨会话的全局列表，
       // 而 mounted 指向的会话未必是刚播种 guide 的那个，按会话匹配会永久漏判。
@@ -276,8 +304,11 @@ window.__ModuleLoader__.load({
 
       if (typeof ctx.inject === 'function') {
         let activeDispose = null;
-        const handle = ctx.inject(['sidebarRight'], (native) => {
+        // layout 与 sidebarRight 一起等：设宽度要 layout.panels，替换 guide 要 sidebarRight，
+        // 两者都齐了再动手，避免先后半截生效。
+        const handle = ctx.inject(['sidebarRight', 'layout'], (native) => {
           activeDispose?.();
+          setRightbarWidth(native?.layout, native?.sidebarRight);
           activeDispose = tryAttach(native?.sidebarRight);
           if (!activeDispose) mark('sidebar-inject-not-ready', { keys: Object.keys(native ?? {}).slice(0, 20) });
           return activeDispose;
@@ -289,6 +320,7 @@ window.__ModuleLoader__.load({
       }
 
       const direct = typeof ctx.get === 'function' ? ctx.get('sidebarRight') : ctx.sidebarRight;
+      setRightbarWidth(typeof ctx.get === 'function' ? ctx.get('layout') : ctx.layout, direct);
       const dispose = tryAttach(direct);
       if (dispose && typeof ctx.effect === 'function') {
         ctx.effect(() => () => dispose(), 'dsh-default-sidebar-tab: sidebar');

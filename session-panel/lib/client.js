@@ -329,12 +329,52 @@ window.__ModuleLoader__.load({
     // renderSlot('utilities') 再渲染 contextMenu 的「…」按钮），把开关放进
     // utilities，它和「…」的相对顺序就固定了：「…」恒为最右。
     // 原生那个按钮由上面的 CSS 拿掉，避免同一行出现两个开关。
-    function HeaderToggle() {
+    function HeaderToggle(props) {
+      const sessionId = props && typeof props.sessionId === 'string' ? props.sessionId : '';
       const onClick = React.useCallback(() => {
-        try { sidebarRightRef?.toggleExpanded?.(); } catch (err) {
-          diag('header-toggle-failed', { message: String(err && err.message || err) });
+        try {
+          // 每次点击现取现用，不依赖模块级引用。
+          // sidebarRightRef 会被 disposer 置空，而插件重载时旧 disposer 可能
+          // 在新注入之后才执行 —— 那样按钮就永久哑掉了。ctx.get 总拿当前实例。
+          const api = (typeof pluginCtx?.get === 'function' ? pluginCtx.get('sidebarRight') : null)
+            ?? sidebarRightRef;
+          if (!api) {
+            diag('header-toggle-no-api', { sessionId });
+            return;
+          }
+          // 分两支，不靠 toggleExpanded 的隐含语义：
+          //  - 已展开 → 收起；
+          //  - 未展开 → 直接打开本插件的会话详情 tab。
+          // 用显式 openTabIn 而不是裸 toggle：后者只翻转 expanded，若该会话的
+          // 布局里没有可显示的 tab（guide 已被替换掉、或 tab 被关掉），
+          // 展开出来的是一列空白，看起来就是「点了没反应」。
+          const expanded = typeof api.isExpanded === 'function' ? api.isExpanded() === true : false;
+          if (expanded) {
+            api.toggleExpanded();
+            diag('header-toggle', { sessionId, action: 'collapse' });
+            return;
+          }
+          // 未展开：先用 openTabIn 打开本插件的 tab（它顺带 planSetExpanded(true)）。
+          // 但 openTabIn 在该会话 store 尚未 adopt 时会**静默什么都不做**，
+          // 所以动作后必须回读状态确认，没生效再退回原生 toggle。
+          if (sessionId !== '' && typeof api.openTabIn === 'function') {
+            try { api.openTabIn(sessionId, TAB_KIND); } catch (err) {
+              diag('header-toggle-open-tab-failed', { sessionId, message: String(err && err.message || err) });
+            }
+            const now = typeof api.isExpanded === 'function' ? api.isExpanded() === true : false;
+            if (now) {
+              diag('header-toggle', { sessionId, action: 'open-tab', kind: TAB_KIND, verified: true });
+              return;
+            }
+            diag('header-toggle', { sessionId, action: 'open-tab-noop', kind: TAB_KIND, verified: false });
+          }
+          api.toggleExpanded();
+          const after = typeof api.isExpanded === 'function' ? api.isExpanded() === true : null;
+          diag('header-toggle', { sessionId, action: 'toggle-fallback', verified: after });
+        } catch (err) {
+          diag('header-toggle-failed', { sessionId, message: String(err && err.message || err) });
         }
-      }, []);
+      }, [sessionId]);
       return h('button', {
         type: 'button',
         className: 'dsp-header-toggle',
@@ -352,7 +392,9 @@ window.__ModuleLoader__.load({
 
     // 原生导航控制器：HeaderToggle 靠它开合右侧栏。sidebar-right 在更晚的
     // apply 阶段 provide，所以用 ctx.inject 等到就绪再落库。
+    // 同时留一份 pluginCtx，供点击时 ctx.get 现取（见 HeaderToggle 的注释）。
     let sidebarRightRef = null;
+    let pluginCtx = null;
 
     // 状态层自证（不依赖 DOM/UI、不点任何按钮）：
     // 读取 sidebar-right 自己写入的持久化布局（localStorage，键 dsh.sidebar-right.v1.<sessionId>），
@@ -694,13 +736,17 @@ window.__ModuleLoader__.load({
       injectStyle();
       diag('apply', { hasSlots: typeof ctx?.slots?.inject === 'function', hasInject: typeof ctx?.inject === 'function' });
       if (!ctx || typeof ctx.slots?.inject !== 'function' || typeof ctx.slots?.register !== 'function') return;
+      pluginCtx = ctx;
 
       // 头部开关依赖原生导航控制器；sidebarRight 就绪后落库供组件调用。
       if (typeof ctx.inject === 'function') {
         const handle = ctx.inject(['sidebarRight'], (native) => {
           sidebarRightRef = native?.sidebarRight ?? null;
           diag('sidebar-right-injected', { hasToggle: typeof sidebarRightRef?.toggleExpanded === 'function' });
-          return () => { sidebarRightRef = null; };
+          // 只清自己写进去的那一份：重载时新旧回调交错，无条件置 null 会把
+          // 新实例擦掉，按钮随即失效。
+          const mine = sidebarRightRef;
+          return () => { if (sidebarRightRef === mine) sidebarRightRef = null; };
         });
         if (typeof ctx.effect === 'function') ctx.effect(() => () => handle?.dispose?.(), 'dsh-session-panel: sidebarRight');
       }

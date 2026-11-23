@@ -303,12 +303,25 @@ window.__ModuleLoader__.load({
       const tryAttach = (sidebar) => (sidebar && typeof sidebar.openTab === 'function' ? attach(sidebar) : null);
 
       if (typeof ctx.inject === 'function') {
+        // 宽度单独注入：layout 是否作为可注入服务暴露，与 sidebarRight 无关。
+        // 放同一个 inject 数组里，一旦 layout 不可注入，连 guide 替换都一起不触发。
+        try {
+          const layoutHandle = ctx.inject(['layout'], (native) => {
+            setRightbarWidth(native?.layout, typeof ctx.get === 'function' ? ctx.get('sidebarRight') : undefined);
+            return undefined;
+          });
+          if (typeof ctx.effect === 'function') ctx.effect(() => () => layoutHandle?.dispose?.(), 'dsh-default-sidebar-tab: layout width');
+        } catch (err) {
+          mark('layout-inject-threw', { message: String(err?.message ?? err) });
+        }
+        // 若布局早就绪，inject 未必回调，这里同步再试一次。
+        try {
+          if (typeof ctx.get === 'function') setRightbarWidth(ctx.get('layout'), ctx.get('sidebarRight'));
+        } catch { /* 未就绪，等上面的 inject */ }
+
         let activeDispose = null;
-        // layout 与 sidebarRight 一起等：设宽度要 layout.panels，替换 guide 要 sidebarRight，
-        // 两者都齐了再动手，避免先后半截生效。
-        const handle = ctx.inject(['sidebarRight', 'layout'], (native) => {
+        const handle = ctx.inject(['sidebarRight'], (native) => {
           activeDispose?.();
-          setRightbarWidth(native?.layout, native?.sidebarRight);
           activeDispose = tryAttach(native?.sidebarRight);
           if (!activeDispose) mark('sidebar-inject-not-ready', { keys: Object.keys(native ?? {}).slice(0, 20) });
           return activeDispose;

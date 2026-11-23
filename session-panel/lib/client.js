@@ -19,6 +19,8 @@ window.__ModuleLoader__.load({
     const ROUTE = '/__dsh-session-panel';
     const POLL_MS = 2500;
     const STYLE_ID = 'dsh-session-panel-style';
+    // 头部常驻开关已就位的标记；只有它存在，CSS 才隐藏原生那两个按钮。
+    const TOGGLE_FLAG = 'data-dsp-header-toggle';
 
     const COPY = {
       environment: '环境', thisComputer: '本机', context: '上下文',
@@ -69,6 +71,22 @@ window.__ModuleLoader__.load({
       '.dsp-stat dd{margin:0;font-variant-numeric:tabular-nums}',
       '.dsp-note{color:var(--dsw-alias-label-secondary,#646a73);font-size:12px;margin:0}',
       '.is-free{color:var(--dsw-alias-label-caption,#8f959e)}',
+      // 头部常驻开关：见 HeaderToggle 的注释。外观对齐同排的 28px 紧凑按钮。
+      '.dsp-header-toggle{flex:none;display:inline-flex;align-items:center;justify-content:center;',
+      'box-sizing:border-box;width:28px;height:28px;padding:0;border:none;border-radius:6px;',
+      'background:transparent;color:var(--dsw-alias-label-secondary,#646a73);cursor:pointer}',
+      '.dsp-header-toggle:hover{background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.06));',
+      'color:var(--dsw-alias-label-primary,#1f2329)}',
+      '.dsp-header-toggle svg{width:15px;height:15px}',
+      // 原生展开按钮坐在 headerCorner（「…」右侧）。它在我们展开时按原生规则不渲染，
+      // 收起时又出现，于是开关在「…」左右来回跳。开关由本插件的常驻按钮接管后，
+      // 这里把它拿掉，「…」因此恒为该行最右。
+      // 规则挂在 body[data-dsp-header-toggle] 上，只有常驻按钮真的注册成功才置位：
+      // 注册失败时原生按钮照旧可用，用户不会失去唯一入口。
+      `body[${TOGGLE_FLAG}] [data-sidebar-right-expand]{display:none!important}`,
+      // 同理收掉 claude-style 那个「收起右侧栏」按钮（它注入在同一行的 utilities，
+      // 落在「…」左侧），避免同一行出现两个开关。
+      `body[${TOGGLE_FLAG}] .dsh-claude-rightbar-close{display:none!important}`,
     ].join('\n');
 
     function injectStyle() {
@@ -301,6 +319,41 @@ window.__ModuleLoader__.load({
       return h('span', { className: 'dsp-tab-title' }, COPY.detailsToggle);
     }
 
+    // 会话头部常驻开关。
+    //
+    // 为什么必须由本插件提供，而不是沿用原生那个：
+    // 原生 ExpandButton 注册在 conversation.session.header.corner，位置在「…」
+    // 右侧；它在桌面端 `expanded === true` 时直接 return null。于是「展开」时
+    // 该按钮消失、「收起」时又出现 —— 面板一起一收，开关就在「…」左右跳。
+    // 而 headerUtilities 里的内容永远渲染在「…」之前（ConversationSession 先
+    // renderSlot('utilities') 再渲染 contextMenu 的「…」按钮），把开关放进
+    // utilities，它和「…」的相对顺序就固定了：「…」恒为最右。
+    // 原生那个按钮由上面的 CSS 拿掉，避免同一行出现两个开关。
+    function HeaderToggle() {
+      const onClick = React.useCallback(() => {
+        try { sidebarRightRef?.toggleExpanded?.(); } catch (err) {
+          diag('header-toggle-failed', { message: String(err && err.message || err) });
+        }
+      }, []);
+      return h('button', {
+        type: 'button',
+        className: 'dsp-header-toggle',
+        'aria-label': COPY.detailsToggle,
+        title: COPY.detailsToggle,
+        'data-dsp-header-toggle': '',
+        onClick,
+      }, h('svg', { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none',
+        stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+        'aria-hidden': 'true' },
+        // 左栏面板图标的镜像：分隔线落在右侧，表示这是"右侧"那一栏。
+        h('rect', { x: 3, y: 4, width: 18, height: 16, rx: 2 }),
+        h('path', { d: 'M15 4v16' })));
+    }
+
+    // 原生导航控制器：HeaderToggle 靠它开合右侧栏。sidebar-right 在更晚的
+    // apply 阶段 provide，所以用 ctx.inject 等到就绪再落库。
+    let sidebarRightRef = null;
+
     // 状态层自证（不依赖 DOM/UI、不点任何按钮）：
     // 读取 sidebar-right 自己写入的持久化布局（localStorage，键 dsh.sidebar-right.v1.<sessionId>），
     // 按其 schema 解析出每个会话的 tab 列表与激活 tab，据此断言：
@@ -465,6 +518,35 @@ window.__ModuleLoader__.load({
     const TAB_ID = '@local/dsh-session-panel';
     const TAB_KIND = 'dsh-session-details';
 
+    // 头部开关的注册：与 tab 类型同一批生命周期。
+    // utilities slot 是 list kind（原生与 claude-style 都往这里加按钮），
+    // 用 slots.register({name}) 追加一条即可，不需要 key。
+    function registerHeaderToggle(ctx) {
+      if (typeof ctx?.slots?.inject !== 'function' || typeof ctx.slots.register !== 'function') return undefined;
+      try {
+        const dispose = ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+          name: 'conversation.session.header.utilities',
+          // id 必填（同名 slot 靠它区分条目）；order 取高位，让开关排在
+          // utilities 内最后一位，紧邻「…」——视觉上就是「开关 + …」固定在右端。
+          id: 'dsh-session-panel-toggle',
+          order: 100,
+        }, HeaderToggle));
+        // 置位 body 标记：CSS 里「藏掉原生展开按钮 / claude-style 收起按钮」的
+        // 规则只在此刻才生效。注册失败时标记不置位，原生入口照旧可用。
+        try { document.body?.setAttribute(TOGGLE_FLAG, ''); } catch {}
+        diag('header-toggle-registered');
+        return {
+          dispose: () => {
+            try { document.body?.removeAttribute(TOGGLE_FLAG); } catch {}
+            try { dispose?.dispose?.(); } catch {}
+          },
+        };
+      } catch (err) {
+        diag('header-toggle-register-failed', { message: String(err && err.message || err) });
+        return undefined;
+      }
+    }
+
     // 运行时自证：把注册过程的关键事实写进 localStorage。
     // 桌面端与 Web 端共用同一份渲染进程存储，可在不截图、不开浏览器的情况下直接核对真实运行时状态。
     const DIAG_KEY = 'dsh-session-panel:diag';
@@ -572,6 +654,21 @@ window.__ModuleLoader__.load({
       injectStyle();
       diag('apply', { hasSlots: typeof ctx?.slots?.inject === 'function', hasInject: typeof ctx?.inject === 'function' });
       if (!ctx || typeof ctx.slots?.inject !== 'function' || typeof ctx.slots?.register !== 'function') return;
+
+      // 头部开关依赖原生导航控制器；sidebarRight 就绪后落库供组件调用。
+      if (typeof ctx.inject === 'function') {
+        const handle = ctx.inject(['sidebarRight'], (native) => {
+          sidebarRightRef = native?.sidebarRight ?? null;
+          diag('sidebar-right-injected', { hasToggle: typeof sidebarRightRef?.toggleExpanded === 'function' });
+          return () => { sidebarRightRef = null; };
+        });
+        if (typeof ctx.effect === 'function') ctx.effect(() => () => handle?.dispose?.(), 'dsh-session-panel: sidebarRight');
+      }
+
+      // 头部常驻开关：无论展开与否都在同一位置，压住「…」不在左右跳动。
+      const disposeToggle = registerHeaderToggle(ctx);
+      if (typeof ctx.effect === 'function') ctx.effect(() => () => disposeToggle?.dispose?.(), 'dsh-session-panel: header toggle');
+
       // sidebarRightTabs 由 sidebar-right 插件在自身 apply 顶层 provide，加载更晚；
       // 用 ctx.inject 等待其就绪后再注册（与 dsh-context 完全一致的时序处理方式）。
       if (typeof ctx.inject === 'function') {

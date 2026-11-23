@@ -147,10 +147,25 @@ window.__ModuleLoader__.load({
       reasoning: COPY.reasoningTokens, 'tool-call': COPY.toolCallTokens, 'tool-result': COPY.toolResultTokens,
       attachment: COPY.attachmentTokens, injection: COPY.injectionTokens,
     };
-    function contextRows(context) {
+    // 已用 token 取哪个口径。
+    //
+    // 宿主 `contextPressure` 的 `pressureTokens` 是供应商结算口径：只有 assistant
+    // 成功结算才落值。请求被取消 / 全部重试失败时它报 0，而分项（由事件折出）
+    // 依然是真实的——那时用它当基数，`used * weight / total` 会把每一行都乘成 0。
+    // 所以供应商值 > 0 时以它为准；否则回退到分项合计，也就是下一轮请求实际
+    // 会发送的表面大小。回退时 `estimated` 为 true，调用方加 `~` 标注，
+    // 不把它伪装成供应商精确读数。
+    function resolveUsed(context) {
+      const parts = Array.isArray(context?.parts) ? context.parts : [];
+      const partsTotal = parts.reduce((s, p) => s + (p.tokens || 0), 0);
+      const providerUsed = Math.max(0, Math.round(context?.used || 0));
+      if (providerUsed > 0) return { used: providerUsed, estimated: false, partsTotal };
+      return { used: partsTotal, estimated: partsTotal > 0, partsTotal };
+    }
+
+    function contextRows(context, used) {
       const parts = Array.isArray(context?.parts) ? context.parts : [];
       const total = parts.reduce((s, p) => s + (p.tokens || 0), 0);
-      const used = Math.max(0, Math.round(context.used));
       const weights = Object.fromEntries(DISPLAY_ORDER.map(k => [k, 0]));
       for (const part of parts) {
         if (part.kind === 'tools' || part.kind === 'mcp' || part.kind === 'skills') weights.capability += part.tokens || 0;
@@ -204,20 +219,26 @@ window.__ModuleLoader__.load({
       if (!context || !(context.window > 0)) {
         return h(Section, { key: 'ctx', title: COPY.context }, h('p', { className: 'dsp-note' }, COPY.noContext));
       }
-      const used = Math.max(0, Math.min(context.window, context.used));
+      const { used: rawUsed, estimated } = resolveUsed(context);
+      const used = Math.max(0, Math.min(context.window, rawUsed));
       const pct = percent(used, context.window);
-      const rows = contextRows(context);
+      const rows = contextRows(context, used);
       const free = Math.max(0, context.window - used);
-      return h(Section, { key: 'ctx', title: COPY.context, summary: pct + '%' },
+      // 回退口径时加 `~`：数值来自按事件折算的表面大小，不是供应商结算读数。
+      const tilde = estimated ? '~' : '';
+      const pctText = tilde + pct;
+      return h(Section, { key: 'ctx', title: COPY.context, summary: pctText + '%' },
         h('div', null,
           h('div', { className: 'dsp-ctx-head' },
-            h('span', null, COPY.contextUsedPct(pct)),
-            h('span', { className: 'dsp-ctx-fig' }, `${compact(used)} / ${compact(context.window)}`)),
-          h('div', { className: 'dsp-bar', role: 'img', 'aria-label': COPY.contextUsedPct(pct) },
+            h('span', null, COPY.contextUsedPct(pctText)),
+            h('span', { className: 'dsp-ctx-fig' }, `${tilde}${compact(used)} / ${compact(context.window)}`)),
+          h('div', { className: 'dsp-bar', role: 'img', 'aria-label': COPY.contextUsedPct(pctText) },
             rows.length
               ? rows.map(r => h('span', { key: r.kind, className: 'dsp-seg', style: { width: r.share + '%', background: COLORS[r.kind] } }))
               : h('span', { className: 'dsp-seg', style: { width: (used / context.window * 100) + '%', background: COLORS.system } })),
-          h('dl', { className: 'dsp-legend', title: '分项按发送给模型的内容计价，并按比例分配至已用上下文' },
+          h('dl', { className: 'dsp-legend', title: estimated
+            ? '分项按发送给模型的内容计价；本轮无供应商结算读数，已用值取分项合计（估算）'
+            : '分项按发送给模型的内容计价，并按比例分配至已用上下文' },
             rows.map(r => h('div', { key: r.kind, className: 'dsp-legend-row' },
               h('dt', null, h('i', { className: 'dsp-dot', style: { background: COLORS[r.kind] } }), r.label),
               h('dd', null, compact(r.tokens)),
